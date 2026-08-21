@@ -51,13 +51,14 @@ if not DB_PASSWORD or not ANTHROPIC_API_KEY:
 
 
 def send_notification_email(to_addrs, subject, body):
-    """Gửi email thông báo qua Gmail SMTP — xem giải thích đầy đủ ở review_app.py. Lỗi gửi email
-    KHÔNG được làm gián đoạn việc nhà cung cấp nộp báo cáo — chỉ âm thầm bỏ qua."""
+    """Gửi email thông báo qua Gmail SMTP — xem giải thích đầy đủ ở review_app.py. Trả về
+    (True, None) nếu thành công, (False, lý_do_lỗi) nếu thất bại — KHÔNG raise exception (không
+    làm gián đoạn việc nhà cung cấp nộp báo cáo)."""
     if isinstance(to_addrs, str):
         to_addrs = [to_addrs]
     to_addrs = [a for a in to_addrs if a]
     if not to_addrs:
-        return
+        return False, "Không có địa chỉ email nhận / No recipient email address"
     try:
         msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = subject
@@ -67,8 +68,9 @@ def send_notification_email(to_addrs, subject, body):
             server.starttls()
             server.login(GMAIL_NOTIFY_ADDRESS, GMAIL_NOTIFY_APP_PASSWORD)
             server.sendmail(GMAIL_NOTIFY_ADDRESS, to_addrs, msg.as_string())
-    except Exception:
-        pass
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 
 def get_connection():
@@ -245,7 +247,7 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
     # Báo cho đúng CS staff đã yêu cầu nhà cung cấp này — không phụ thuộc Microsoft 365 công ty.
     with conn.cursor() as cur:
         cur.execute("""
-            select cs.email, t.supplier_name, c.so_po
+            select cs.email, t.supplier_name, c.so_po, t.requested_by_staff_id
             from supplier_report_token t
             left join cs_staff cs on t.requested_by_staff_id = cs.staff_id
             left join complaint c on t.complaint_id = c.complaint_id
@@ -253,8 +255,9 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
             order by t.created_at desc limit 1;
         """, (complaint_id,))
         notify_row = cur.fetchone()
+    print(f"[notify-debug] complaint_id={complaint_id} notify_row={notify_row}")
     if notify_row and notify_row[0]:
-        cs_email, supplier_name_notify, so_po_notify = notify_row
+        cs_email, supplier_name_notify, so_po_notify, _requested_by_id = notify_row
         summary_lines_text = "\n".join(f"- {line}" for line in summary)
         has_pending = any("hàng đợi chờ duyệt" in line for line in summary)
         if has_pending:
@@ -267,7 +270,7 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
                 "✅ Mọi root cause/CAPA đã khớp mã có sẵn — có thể vào ngay tab 'Truy xuất dữ liệu' "
                 "để soạn email trả lời khách hàng."
             )
-        send_notification_email(
+        mail_ok, mail_err = send_notification_email(
             cs_email,
             f"[Nilorn Internal AI] {supplier_name_notify} vừa nộp báo cáo",
             f"Nhà cung cấp {supplier_name_notify} vừa nộp báo cáo điều tra cho complaint "
@@ -275,6 +278,12 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
             f"Kết quả xử lý tự động:\n{summary_lines_text}\n\n"
             f"{next_step}\n\n"
             f"Vào app 'Nilorn Internal AI' → tab 'Truy xuất dữ liệu' → chọn đúng complaint để xem chi tiết.",
+        )
+        print(f"[notify-debug] mail_ok={mail_ok} mail_err={mail_err} cs_email={cs_email}")
+    else:
+        print(
+            f"[notify-debug] SKIPPED — no cs.email found for this token "
+            f"(requested_by_staff_id={notify_row[3] if notify_row else None})"
         )
 
     return summary
