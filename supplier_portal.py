@@ -45,7 +45,7 @@ GMAIL_NOTIFY_APP_PASSWORD = st.secrets.get("GMAIL_NOTIFY_APP_PASSWORD", "")
 # ngay, dù chưa auto-login được (không có Graph API). TODO: điền đúng địa chỉ LAN thật của máy chủ
 # nội bộ sau khi đã host review_app.py cố định (dạng http://192.168.x.x:8501) — để trống thì email
 # vẫn gửi bình thường, chỉ là không có link kèm theo.
-REVIEW_APP_URL = st.secrets.get("REVIEW_APP_URL", "")
+REVIEW_APP_URL = st.secrets.get("REVIEW_APP_URL", "http://172.16.60.151:8501")
 
 if not DB_PASSWORD or not ANTHROPIC_API_KEY:
     st.error(
