@@ -41,6 +41,12 @@ ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 GMAIL_NOTIFY_ADDRESS = st.secrets.get("GMAIL_NOTIFY_ADDRESS", "")
 GMAIL_NOTIFY_APP_PASSWORD = st.secrets.get("GMAIL_NOTIFY_APP_PASSWORD", "")
 
+# Link trực tiếp tới review_app.py (chạy nội bộ tại công ty) — chèn vào email báo CS để bấm mở app
+# ngay, dù chưa auto-login được (không có Graph API). TODO: điền đúng địa chỉ LAN thật của máy chủ
+# nội bộ sau khi đã host review_app.py cố định (dạng http://192.168.x.x:8501) — để trống thì email
+# vẫn gửi bình thường, chỉ là không có link kèm theo.
+REVIEW_APP_URL = st.secrets.get("REVIEW_APP_URL", "")
+
 if not DB_PASSWORD or not ANTHROPIC_API_KEY:
     st.error(
         "⚠️ Thiếu cấu hình Secrets (DB_PASSWORD / ANTHROPIC_API_KEY) — app này đọc thông tin nhạy "
@@ -191,7 +197,7 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
                     (result["matched_code"], complaint_id),
                 )
             conn.commit()
-            summary.append(f"Root cause #{idx}: khớp mã có sẵn {result['matched_code']}")
+            summary.append(f"Root cause #{idx}: khớp mã có sẵn {result['matched_code']} — \"{rc_text.strip()}\"")
         else:
             closest = result.get("closest_existing_code") or result.get("matched_code")
             note = f"Nhà cung cấp tự mô tả (#{idx}): {rc_text.strip()}. AI kiểm tra chéo: {result.get('reasoning', '')}"
@@ -202,7 +208,7 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
                     (complaint_id, result.get("suggested_name") or rc_text.strip()[:100], note, closest),
                 )
             conn.commit()
-            summary.append(f"Root cause #{idx}: đã gửi vào hàng đợi chờ duyệt (có thể là loại mới)")
+            summary.append(f"Root cause #{idx}: đã gửi vào hàng đợi chờ duyệt (có thể là loại mới) — \"{rc_text.strip()}\"")
 
     capa_list = None
     for idx, (capa_text, responsible) in enumerate(capa_items, start=1):
@@ -220,7 +226,10 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
                     (complaint_id, result["matched_code"], responsible or None),
                 )
             conn.commit()
-            summary.append(f"CAPA #{idx}: khớp mã có sẵn {result['matched_code']}")
+            summary.append(
+                f"CAPA #{idx}: khớp mã có sẵn {result['matched_code']} — \"{capa_text.strip()}\""
+                + (f" (phụ trách: {responsible})" if responsible else "")
+            )
         else:
             closest = result.get("closest_existing_code") or result.get("matched_code")
             note = (
@@ -234,7 +243,10 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
                     (complaint_id, result.get("suggested_name") or capa_text.strip()[:100], note, closest, responsible or None),
                 )
             conn.commit()
-            summary.append(f"CAPA #{idx}: đã gửi vào hàng đợi chờ duyệt (có thể là loại mới)")
+            summary.append(
+                f"CAPA #{idx}: đã gửi vào hàng đợi chờ duyệt (có thể là loại mới) — \"{capa_text.strip()}\""
+                + (f" (phụ trách: {responsible})" if responsible else "")
+            )
 
     with conn.cursor() as cur:
         cur.execute(
@@ -283,6 +295,7 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
                 "✅ Mọi root cause/CAPA đã khớp mã có sẵn — có thể vào ngay tab 'Truy xuất dữ liệu' "
                 "để soạn email trả lời khách hàng."
             )
+        app_link_line = f"Mở app: {REVIEW_APP_URL}\n\n" if REVIEW_APP_URL else ""
         mail_ok, mail_err = send_notification_email(
             cs_email,
             f"[Nilorn Internal AI] {supplier_name_notify} vừa nộp báo cáo",
@@ -290,6 +303,7 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
             f"{so_po_notify or complaint_id}.\n\n"
             f"Kết quả xử lý tự động:\n{summary_lines_text}\n\n"
             f"{next_step}\n\n"
+            f"{app_link_line}"
             f"Vào app 'Nilorn Internal AI' → tab 'Truy xuất dữ liệu' → chọn đúng complaint để xem chi tiết.",
         )
         _log_notify_attempt(cs_email, mail_ok, mail_err)
