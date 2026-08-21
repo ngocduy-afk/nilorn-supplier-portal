@@ -245,6 +245,20 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
     conn.commit()
 
     # Báo cho đúng CS staff đã yêu cầu nhà cung cấp này — không phụ thuộc Microsoft 365 công ty.
+    # Ghi lại kết quả vào bảng notify_debug_log (thay vì chỉ print ra console) để xem trực tiếp qua
+    # Supabase Table Editor — đáng tin cậy hơn xem log trực tiếp trên Streamlit Cloud.
+    def _log_notify_attempt(cs_email_val, mail_ok_val, mail_err_val):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "insert into notify_debug_log (complaint_id, cs_email, mail_ok, mail_err) "
+                    "values (%s, %s, %s, %s);",
+                    (complaint_id, cs_email_val, mail_ok_val, mail_err_val),
+                )
+            conn.commit()
+        except Exception:
+            pass
+
     with conn.cursor() as cur:
         cur.execute("""
             select cs.email, t.supplier_name, c.so_po, t.requested_by_staff_id
@@ -255,7 +269,6 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
             order by t.created_at desc limit 1;
         """, (complaint_id,))
         notify_row = cur.fetchone()
-    print(f"[notify-debug] complaint_id={complaint_id} notify_row={notify_row}")
     if notify_row and notify_row[0]:
         cs_email, supplier_name_notify, so_po_notify, _requested_by_id = notify_row
         summary_lines_text = "\n".join(f"- {line}" for line in summary)
@@ -279,12 +292,9 @@ def submit_supplier_report(conn, ai_client, complaint_id, root_cause_texts, capa
             f"{next_step}\n\n"
             f"Vào app 'Nilorn Internal AI' → tab 'Truy xuất dữ liệu' → chọn đúng complaint để xem chi tiết.",
         )
-        print(f"[notify-debug] mail_ok={mail_ok} mail_err={mail_err} cs_email={cs_email}")
+        _log_notify_attempt(cs_email, mail_ok, mail_err)
     else:
-        print(
-            f"[notify-debug] SKIPPED — no cs.email found for this token "
-            f"(requested_by_staff_id={notify_row[3] if notify_row else None})"
-        )
+        _log_notify_attempt(None, False, f"SKIPPED — no cs.email found (requested_by_staff_id={notify_row[3] if notify_row else None})")
 
     return summary
 
