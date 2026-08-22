@@ -162,6 +162,59 @@ def match_vendor(conn, typed_name):
 
 
 # ============================================================
+# NỐI DỮ LIỆU SANG BẢNG CŨ (complaint / taxonomy_suggestion) — để tab "Truy xuất dữ liệu" và
+# "Hỏi AI" (đọc từ bảng complaint) cũng thấy được complaint từ luồng mới này. Root Cause/CAPA nhà
+# cung cấp tự gõ được đưa vào hàng đợi "Pending" — tận dụng đúng cơ chế Duyệt Taxonomy + email báo
+# reviewer đã có sẵn, không xây lại từ đầu. Khi reviewer duyệt xong, cơ chế cũ tự cập nhật thẳng
+# vào bảng complaint — không cần thêm code đồng bộ nào nữa.
+# ============================================================
+def get_or_create_supplier(conn, name):
+    if not name:
+        return None
+    with conn.cursor() as cur:
+        cur.execute("select supplier_id from supplier where name = %s limit 1;", (name,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        cur.execute("insert into supplier (name) values (%s) returning supplier_id;", (name,))
+        new_id = cur.fetchone()[0]
+    conn.commit()
+    return new_id
+
+
+def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw, vendor_name_matched,
+                             sales_order_no, purchase_order_no, order_qty, defect_qty,
+                             description, root_cause_text, capa_text):
+    supplier_id = get_or_create_supplier(conn, vendor_name_matched or supplier_name_raw)
+    with conn.cursor() as cur:
+        cur.execute(
+            """insert into complaint
+                   (date_opened, source, supplier_id, so_po, quantity_inspected, quantity_affected,
+                    notes, status)
+               values (%s, %s, %s, %s, %s, %s, %s, 'Open')
+               returning complaint_id;""",
+            (record_date, "Nhà cung cấp tự khai báo (link chung)", supplier_id,
+             f"{sales_order_no} / {purchase_order_no}", order_qty, defect_qty, description),
+        )
+        complaint_id = cur.fetchone()[0]
+
+        cur.execute(
+            """insert into taxonomy_suggestion
+                   (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning)
+               values (%s, 'Root Cause', %s, %s);""",
+            (complaint_id, root_cause_text[:200], "Do nhà cung cấp tự gõ khi nộp báo cáo qua link chung."),
+        )
+        cur.execute(
+            """insert into taxonomy_suggestion
+                   (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning)
+               values (%s, 'CAPA', %s, %s);""",
+            (complaint_id, capa_text[:200], "Do nhà cung cấp tự gõ khi nộp báo cáo qua link chung."),
+        )
+    conn.commit()
+    return complaint_id
+
+
+# ============================================================
 # GIAO DIỆN
 # ============================================================
 st.set_page_config(page_title="Nilorn Supplier Quality Report", layout="centered")
@@ -181,6 +234,7 @@ st.caption(
 with st.form("supplier_report_form", clear_on_submit=False):
     st.subheader("1. Your Company & Order Information")
     supplier_name_raw = st.text_input("Supplier / Vendor Company Name *", placeholder="e.g. Nilorn Vietnam Company Limited")
+    record_date_in = st.date_input("Record Date *", value=datetime.now().date())
     col1, col2 = st.columns(2)
     with col1:
         sales_order_no = st.text_input("Sales Order No. *")
@@ -276,13 +330,13 @@ if submitted:
                 with conn.cursor() as cur:
                     cur.execute(
                         """insert into supplier_submissions
-                               (supplier_name_raw, sales_order_no, purchase_order_no, item_no,
+                               (record_date, supplier_name_raw, sales_order_no, purchase_order_no, item_no,
                                 order_qty, defect_qty, description, root_cause, capa, capa_status,
                                 defect_image_urls, defect_video_url,
                                 vendor_code, vendor_name_matched, match_confidence)
-                           values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                            returning submission_id;""",
-                        (supplier_name_raw.strip(), sales_order_no.strip(), purchase_order_no.strip(),
+                        (record_date_in, supplier_name_raw.strip(), sales_order_no.strip(), purchase_order_no.strip(),
                          item_no.strip(), int(order_qty), int(defect_qty), description.strip(),
                          root_cause.strip(), capa.strip(), capa_status,
                          _json.dumps(image_urls), video_url,
@@ -290,6 +344,16 @@ if submitted:
                     )
                     submission_id = cur.fetchone()[0]
                 conn.commit()
+
+                try:
+                    bridge_to_legacy_tables(
+                        conn, submission_id, record_date_in, supplier_name_raw.strip(),
+                        vendor_name_matched, sales_order_no.strip(), purchase_order_no.strip(),
+                        int(order_qty), int(defect_qty), description.strip(),
+                        root_cause.strip(), capa.strip(),
+                    )
+                except Exception:
+                    pass  # không để lỗi ở bước nối dữ liệu cũ làm ảnh hưởng việc nộp báo cáo chính
 
                 match_note = (
                     f"Matched vendor: {vendor_name_matched} ({vendor_code})" if vendor_code
