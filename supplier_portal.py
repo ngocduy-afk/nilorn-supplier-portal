@@ -220,51 +220,78 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
 st.set_page_config(page_title="Nilorn Supplier Quality Report", layout="centered")
 st.markdown(
     """<style>
-.stApp { background: #f4f5f8; }
+.stApp { background: #f4f5f8; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 .fc-required { color: #a32d2d; font-weight: 600; }
+div[class*="st-key-zone_blue_"] {
+    background: #dfedfa; border-left: 4px solid #185fa5;
+    border-radius: 0 12px 12px 0; padding: 0.4rem 1.2rem 1.1rem; margin-bottom: 0.8rem;
+}
+div[class*="st-key-zone_amber_"] {
+    background: #f8e9cd; border-left: 4px solid #ba7517;
+    border-radius: 0 12px 12px 0; padding: 0.4rem 1.2rem 1.1rem; margin-bottom: 0.8rem;
+}
+div[class*="st-key-zone_teal_"] {
+    background: #d9f0e6; border-left: 4px solid #0f6e56;
+    border-radius: 0 12px 12px 0; padding: 0.4rem 1.2rem 1.1rem; margin-bottom: 0.8rem;
+}
 </style>""",
     unsafe_allow_html=True,
 )
 
-st.title("📋 Nilorn — Supplier Quality Issue Report")
-st.caption(
-    "Please complete all fields below to report a quality issue. All fields marked with * are required."
+_zone_counters = {}
+
+
+def zone_card(color):
+    n = _zone_counters.get(color, 0)
+    _zone_counters[color] = n + 1
+    return st.container(key=f"zone_{color}_{n}")
+
+
+st.markdown(
+    """<div style="background:linear-gradient(135deg,#185fa5,#0c447c); border-radius:12px;
+    padding:1.4rem 1.6rem; margin-bottom:1.2rem;">
+    <div style="font-size:22px; font-weight:700; color:#fff;">📋 Nilorn — Supplier Quality Issue Report</div>
+    <div style="font-size:13px; color:#dfedfa; margin-top:4px;">
+    Please complete all fields below to report a quality issue. All fields marked with * are required.</div>
+    </div>""",
+    unsafe_allow_html=True,
 )
 
 with st.form("supplier_report_form", clear_on_submit=False):
-    st.subheader("1. Your Company & Order Information")
-    supplier_name_raw = st.text_input("Supplier / Vendor Company Name *", placeholder="e.g. Nilorn Vietnam Company Limited")
-    record_date_in = st.date_input("Record Date *", value=datetime.now().date())
-    col1, col2 = st.columns(2)
-    with col1:
-        sales_order_no = st.text_input("Sales Order No. *")
-        item_no = st.text_input("Item No. *")
-        order_qty = st.number_input("Order Qty *", min_value=0, step=1)
-    with col2:
-        purchase_order_no = st.text_input("Purchase Order No. *")
-        defect_qty = st.number_input("Defect Qty *", min_value=0, step=1)
+    with zone_card("blue"):
+        st.markdown("#### 1. Your Company & Order Information")
+        supplier_name_raw = st.text_input("Supplier / Vendor Company Name *", placeholder="e.g. Nilorn Vietnam Company Limited")
+        record_date_in = st.date_input("Record Date *", value=datetime.now().date())
+        col1, col2 = st.columns(2)
+        with col1:
+            sales_order_no = st.text_input("Sales Order No. *")
+            item_no = st.text_input("Item No. *")
+            order_qty = st.number_input("Order Qty *", min_value=0, step=1)
+        with col2:
+            purchase_order_no = st.text_input("Purchase Order No. *")
+            defect_qty = st.number_input("Defect Qty *", min_value=0, step=1)
 
-    st.markdown("---")
-    st.subheader("2. Issue Details")
-    description = st.text_area("Issue Description *", height=90, placeholder="What is the defect?")
-    root_cause = st.text_area("Root Cause *", height=90, placeholder="What caused this issue on your end?")
-    capa = st.text_area("Corrective Action (CAPA) *", height=90, placeholder="What action have you taken or will take?")
-    capa_status = st.selectbox("CAPA Status *", ["In Progress", "Completed", "Pending Verification", "Closed"])
+    with zone_card("amber"):
+        st.markdown("#### 2. Issue Details")
+        description = st.text_area("Issue Description *", height=90, placeholder="What is the defect?")
+        root_cause = st.text_area("Root Cause *", height=90, placeholder="What caused this issue on your end?")
+        capa = st.text_area("Corrective Action (CAPA) *", height=90, placeholder="What action have you taken or will take?")
+        capa_status = st.selectbox("CAPA Status *", ["In Progress", "Completed", "Pending Verification", "Closed"])
 
-    st.markdown("---")
-    st.subheader("3. Photos & Video")
-    st.caption(
-        "📷 **Photos are strongly preferred over video** — they upload faster and are easier for us to "
-        "review. Please only attach a video if photos alone cannot show the issue clearly."
-    )
-    defect_images = st.file_uploader(
-        f"Defect photo(s) * — at least 1 required, up to 3 (max {MAX_IMAGE_MB}MB each)",
-        type=["png", "jpg", "jpeg"], accept_multiple_files=True,
-    )
-    defect_video = st.file_uploader(
-        f"Defect video (optional, max {MAX_VIDEO_MB}MB — roughly a 30-45 second clip)",
-        type=["mp4", "mov", "avi", "webm"],
-    )
+    with zone_card("teal"):
+        st.markdown("#### 3. Photos & Video")
+        st.caption(
+            "📷 **Photos are strongly preferred over video** — they upload faster and are easier for us to "
+            "review. Please only attach a video if photos alone cannot show the issue clearly."
+        )
+        defect_images = st.file_uploader(
+            f"Defect photo(s) * — at least 1 required, up to 3 (max {MAX_IMAGE_MB}MB each)",
+            type=["png", "jpg", "jpeg"], accept_multiple_files=True,
+        )
+        defect_video = st.file_uploader(
+            f"Defect video (optional, max {MAX_VIDEO_MB}MB — roughly a 30-45 second clip)",
+            type=["mp4", "mov", "avi", "webm"],
+        )
 
     submitted = st.form_submit_button("✅ Submit Report")
 
