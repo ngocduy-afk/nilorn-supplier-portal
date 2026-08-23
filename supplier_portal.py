@@ -14,6 +14,8 @@ import uuid
 import difflib
 import smtplib
 import requests
+import anthropic
+import json
 from email.mime.text import MIMEText
 from datetime import datetime
 
@@ -29,6 +31,7 @@ DB_PASSWORD = st.secrets.get("DB_PASSWORD", "")
 GMAIL_NOTIFY_ADDRESS = st.secrets.get("GMAIL_NOTIFY_ADDRESS", "")
 GMAIL_NOTIFY_APP_PASSWORD = st.secrets.get("GMAIL_NOTIFY_APP_PASSWORD", "")
 REVIEW_APP_URL = st.secrets.get("REVIEW_APP_URL", "http://172.16.60.151:8501")
+ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 
 # Danh sách email nhận thông báo "có báo cáo mới từ NCC" — điền toàn bộ CS cần biết.
 TEAM_EMAILS = [e.strip() for e in st.secrets.get("TEAM_EMAILS", "").split(",") if e.strip()]
@@ -182,10 +185,79 @@ def get_or_create_supplier(conn, name):
     return new_id
 
 
+def extract_text(response):
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    return ""
+
+
+def load_taxonomy_list(conn, kind):
+    table, code_col, name_col = {
+        "Root Cause": ("root_cause_taxonomy", "root_cause_code", "root_cause"),
+        "CAPA": ("capa_taxonomy", "capa_code", "capa_action"),
+    }[kind]
+    with conn.cursor() as cur:
+        cur.execute(f"select {code_col}, {name_col}, description from {table} order by {code_col};")
+        rows = cur.fetchall()
+    return [{"code": r[0], "name": r[1], "description": r[2]} for r in rows]
+
+
+def classify_description(client, description_vi, taxonomy_list, kind):
+    """Y hệt hàm cùng tên trong review_app.py — dùng để AI gợi ý mã khớp cho reviewer, thay vì để
+    Duyệt Taxonomy hiện đề xuất trống trơn không gợi ý gì (đúng vấn đề đã gặp phải)."""
+    taxonomy_text = "\n".join(
+        f"- {t['code']}: {t['name']} — {t['description']}" for t in taxonomy_list
+    )
+    prompt = f"""Bạn là trợ lý QA cho nhà máy sản xuất nhãn/bao bì apparel branding.
+Dưới đây là danh mục {kind} hiện có:
+
+{taxonomy_text}
+
+Mô tả sự cố mới (có thể tiếng Anh hoặc tiếng Việt, do nhà cung cấp tự gõ):
+"{description_vi}"
+
+Nhiệm vụ: xác định mô tả này có khớp với 1 mã {kind} nào có sẵn ở trên không.
+Chỉ trả lời bằng JSON đúng định dạng sau, không thêm chữ nào khác:
+
+{{
+  "matched_code": "<mã nếu khớp rõ ràng, hoặc null nếu không>",
+  "confidence": "<High|Medium|Low>",
+  "is_new_suggestion": <true nếu nên đề xuất mã mới, false nếu đã khớp>,
+  "suggested_name": "<tên ngắn gọn nếu là mã mới, tiếng Anh, theo văn phong các mã hiện có>",
+  "closest_existing_code": "<mã gần giống nhất dù không khớp hoàn toàn, hoặc null>",
+  "reasoning": "<1-2 câu giải thích, tiếng Việt>"
+}}
+"""
+    resp = client.messages.create(
+        model="claude-haiku-4-5-20251001", max_tokens=700,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = extract_text(resp).strip().replace("```json", "").replace("```", "").strip()
+    return json.loads(text)
+
+
 def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw, vendor_name_matched,
                              sales_order_no, purchase_order_no, order_qty, defect_qty,
                              description, root_cause_text, capa_text):
     supplier_id = get_or_create_supplier(conn, vendor_name_matched or supplier_name_raw)
+
+    # AI gợi ý mã khớp sẵn có cho reviewer — không bắt buộc phải thành công, nếu lỗi thì vẫn tạo
+    # đề xuất bình thường (chỉ là không có gợi ý sẵn, reviewer tự chọn tay).
+    ai_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+
+    def _classify_safe(text, kind):
+        if not ai_client:
+            return None
+        try:
+            taxonomy_list = load_taxonomy_list(conn, kind)
+            return classify_description(ai_client, text, taxonomy_list, kind)
+        except Exception:
+            return None
+
+    rc_result = _classify_safe(root_cause_text, "Root Cause")
+    capa_result = _classify_safe(capa_text, "CAPA")
+
     with conn.cursor() as cur:
         cur.execute(
             """insert into complaint
@@ -198,17 +270,28 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
         )
         complaint_id = cur.fetchone()[0]
 
-        cur.execute(
-            """insert into taxonomy_suggestion
-                   (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning)
-               values (%s, 'Root Cause', %s, %s);""",
-            (complaint_id, root_cause_text[:200], "Do nhà cung cấp tự gõ khi nộp báo cáo qua link chung."),
+        rc_closest = (rc_result or {}).get("closest_existing_code") or (rc_result or {}).get("matched_code")
+        rc_reasoning = (
+            f"Do nhà cung cấp tự gõ khi nộp báo cáo qua link chung. "
+            f"AI gợi ý: {(rc_result or {}).get('reasoning', '(không phân loại được)')}"
         )
         cur.execute(
             """insert into taxonomy_suggestion
-                   (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning)
-               values (%s, 'CAPA', %s, %s);""",
-            (complaint_id, capa_text[:200], "Do nhà cung cấp tự gõ khi nộp báo cáo qua link chung."),
+                   (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning, closest_existing_code)
+               values (%s, 'Root Cause', %s, %s, %s);""",
+            (complaint_id, root_cause_text[:200], rc_reasoning, rc_closest),
+        )
+
+        capa_closest = (capa_result or {}).get("closest_existing_code") or (capa_result or {}).get("matched_code")
+        capa_reasoning = (
+            f"Do nhà cung cấp tự gõ khi nộp báo cáo qua link chung. "
+            f"AI gợi ý: {(capa_result or {}).get('reasoning', '(không phân loại được)')}"
+        )
+        cur.execute(
+            """insert into taxonomy_suggestion
+                   (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning, closest_existing_code)
+               values (%s, 'CAPA', %s, %s, %s);""",
+            (complaint_id, capa_text[:200], capa_reasoning, capa_closest),
         )
     conn.commit()
     return complaint_id
