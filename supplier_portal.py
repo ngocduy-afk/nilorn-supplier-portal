@@ -32,6 +32,9 @@ GMAIL_NOTIFY_ADDRESS = st.secrets.get("GMAIL_NOTIFY_ADDRESS", "")
 GMAIL_NOTIFY_APP_PASSWORD = st.secrets.get("GMAIL_NOTIFY_APP_PASSWORD", "")
 REVIEW_APP_URL = st.secrets.get("REVIEW_APP_URL", "http://172.16.60.151:8501")
 ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
+# Email người duyệt Root Cause/CAPA/Defect (Kim, Duy...) — nhận thông báo NGAY khi có đề xuất mới,
+# không cần chờ ai mở tab Duyệt Taxonomy trên review_app.py mới được báo.
+APPROVER_EMAILS = [e.strip() for e in st.secrets.get("APPROVER_EMAILS", "").split(",") if e.strip()]
 
 # Danh sách email nhận thông báo "có báo cáo mới từ NCC" — điền toàn bộ CS cần biết.
 TEAM_EMAILS = [e.strip() for e in st.secrets.get("TEAM_EMAILS", "").split(",") if e.strip()]
@@ -194,6 +197,7 @@ def extract_text(response):
 
 def load_taxonomy_list(conn, kind):
     table, code_col, name_col = {
+        "Defect": ("defect_taxonomy", "defect_code", "defect_name"),
         "Root Cause": ("root_cause_taxonomy", "root_cause_code", "root_cause"),
         "CAPA": ("capa_taxonomy", "capa_code", "capa_action"),
     }[kind]
@@ -253,8 +257,13 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
             taxonomy_list = load_taxonomy_list(conn, kind)
             return classify_description(ai_client, text, taxonomy_list, kind)
         except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             return None
 
+    defect_result = _classify_safe(description, "Defect")
     rc_result = _classify_safe(root_cause_text, "Root Cause")
     capa_result = _classify_safe(capa_text, "CAPA")
 
@@ -270,30 +279,40 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
         )
         complaint_id = cur.fetchone()[0]
 
-        rc_closest = (rc_result or {}).get("closest_existing_code") or (rc_result or {}).get("matched_code")
-        rc_reasoning = (
-            f"Do nhà cung cấp tự gõ khi nộp báo cáo qua link chung. "
-            f"AI gợi ý: {(rc_result or {}).get('reasoning', '(không phân loại được)')}"
-        )
-        cur.execute(
-            """insert into taxonomy_suggestion
-                   (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning, closest_existing_code)
-               values (%s, 'Root Cause', %s, %s, %s);""",
-            (complaint_id, root_cause_text[:200], rc_reasoning, rc_closest),
+        new_suggestions = []  # (kind, ai_suggested_name) — dùng để soạn email báo reviewer bên dưới
+
+        for kind, text, result in [
+            ("Defect", description, defect_result),
+            ("Root Cause", root_cause_text, rc_result),
+            ("CAPA", capa_text, capa_result),
+        ]:
+            closest = (result or {}).get("closest_existing_code") or (result or {}).get("matched_code")
+            reasoning = (
+                f"Do nhà cung cấp tự gõ khi nộp báo cáo qua link chung. "
+                f"AI gợi ý: {(result or {}).get('reasoning', '(không phân loại được)')}"
+            )
+            suggested_name = text[:200]
+            cur.execute(
+                """insert into taxonomy_suggestion
+                       (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning, closest_existing_code)
+                   values (%s, %s, %s, %s, %s);""",
+                (complaint_id, kind, suggested_name, reasoning, closest),
+            )
+            new_suggestions.append((kind, suggested_name))
+
+    conn.commit()
+
+    # Báo reviewer NGAY lúc này — không chờ ai đó mở tab Duyệt Taxonomy trên review_app.py mới
+    # được thông báo (cơ chế cũ chỉ kiểm tra khi có người ghé trang đó).
+    if APPROVER_EMAILS:
+        lines = "\n".join(f"- [{kind}] {name}" for kind, name in new_suggestions)
+        send_notification_email(
+            APPROVER_EMAILS,
+            f"[Nilorn Internal AI] {len(new_suggestions)} đề xuất mới cần duyệt (từ {supplier_name_raw})",
+            f"Có {len(new_suggestions)} đề xuất mới đang chờ duyệt, vừa tạo từ báo cáo NCC vừa nộp:\n\n"
+            f"{lines}\n\nVào app, tab 'Duyệt Taxonomy' để xem và xử lý: {REVIEW_APP_URL}",
         )
 
-        capa_closest = (capa_result or {}).get("closest_existing_code") or (capa_result or {}).get("matched_code")
-        capa_reasoning = (
-            f"Do nhà cung cấp tự gõ khi nộp báo cáo qua link chung. "
-            f"AI gợi ý: {(capa_result or {}).get('reasoning', '(không phân loại được)')}"
-        )
-        cur.execute(
-            """insert into taxonomy_suggestion
-                   (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning, closest_existing_code)
-               values (%s, 'CAPA', %s, %s, %s);""",
-            (complaint_id, capa_text[:200], capa_reasoning, capa_closest),
-        )
-    conn.commit()
     return complaint_id
 
 
@@ -463,7 +482,12 @@ if submitted:
                         root_cause.strip(), capa.strip(),
                     )
                 except Exception:
-                    pass  # không để lỗi ở bước nối dữ liệu cũ làm ảnh hưởng việc nộp báo cáo chính
+                    # Bắt buộc rollback — nếu không, transaction bị "kẹt" và MỌI câu lệnh SQL sau
+                    # đó (kể cả bước gửi email thông báo bên dưới) sẽ lỗi theo dây chuyền.
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
                 match_note = (
                     f"Matched vendor: {vendor_name_matched} ({vendor_code})" if vendor_code
