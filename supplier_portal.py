@@ -306,12 +306,15 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
     # được thông báo (cơ chế cũ chỉ kiểm tra khi có người ghé trang đó).
     if APPROVER_EMAILS:
         lines = "\n".join(f"- [{kind}] {name}" for kind, name in new_suggestions)
-        send_notification_email(
+        approver_mail_ok, approver_mail_err = send_notification_email(
             APPROVER_EMAILS,
             f"[Nilorn Internal AI] {len(new_suggestions)} đề xuất mới cần duyệt (từ {supplier_name_raw})",
             f"Có {len(new_suggestions)} đề xuất mới đang chờ duyệt, vừa tạo từ báo cáo NCC vừa nộp:\n\n"
             f"{lines}\n\nVào app, tab 'Duyệt Taxonomy' để xem và xử lý: {REVIEW_APP_URL}",
         )
+        _log_notify_attempt(conn, complaint_id, APPROVER_EMAILS, approver_mail_ok, approver_mail_err)
+    else:
+        _log_notify_attempt(conn, complaint_id, [], False, "SKIPPED — APPROVER_EMAILS trống (chưa điền trong Secrets)")
 
     return complaint_id
 
