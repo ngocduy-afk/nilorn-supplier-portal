@@ -381,7 +381,6 @@ with st.form("supplier_report_form", clear_on_submit=False):
         description = st.text_area("Issue Description *", height=90, placeholder="What is the defect?")
         root_cause = st.text_area("Root Cause *", height=90, placeholder="What caused this issue on your end?")
         capa = st.text_area("Corrective Action (CAPA) *", height=90, placeholder="What action have you taken or will take?")
-        capa_status = st.selectbox("CAPA Status *", ["In Progress", "Completed", "Pending Verification", "Closed"])
 
     with zone_card("teal"):
         st.markdown("#### 3. Photos & Video")
@@ -470,7 +469,8 @@ if submitted:
                            returning submission_id;""",
                         (record_date_in, supplier_name_raw.strip(), sales_order_no.strip(), purchase_order_no.strip(),
                          item_no.strip(), int(order_qty), int(defect_qty), description.strip(),
-                         root_cause.strip(), capa.strip(), capa_status,
+                         root_cause.strip(), capa.strip(), "",  # capa_status không còn hỏi NCC — trạng thái
+                         # xử lý giờ do CS quản lý tập trung qua "Trạng thái xử lý complaint" ở Truy xuất dữ liệu.
                          _json.dumps(image_urls), video_url,
                          vendor_code, vendor_name_matched, confidence),
                     )
@@ -506,8 +506,7 @@ if submitted:
                     f"Order Qty: {order_qty}  |  Defect Qty: {defect_qty}\n\n"
                     f"Description: {description.strip()}\n"
                     f"Root Cause: {root_cause.strip()}\n"
-                    f"CAPA: {capa.strip()}\n"
-                    f"CAPA Status: {capa_status}\n\n"
+                    f"CAPA: {capa.strip()}\n\n"
                     f"Photos attached: {len(image_urls)}" + (" | Video attached" if video_url else "") + "\n\n"
                     f"Open the app to review and complete Customer / Replacement Cost: {REVIEW_APP_URL}"
                 )
