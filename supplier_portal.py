@@ -32,6 +32,14 @@ GMAIL_NOTIFY_ADDRESS = st.secrets.get("GMAIL_NOTIFY_ADDRESS", "")
 GMAIL_NOTIFY_APP_PASSWORD = st.secrets.get("GMAIL_NOTIFY_APP_PASSWORD", "")
 REVIEW_APP_URL = st.secrets.get("REVIEW_APP_URL", "http://172.16.60.151:8501")
 ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
+PRODUCT_GROUPS = [
+    "HANGTAG", "WOVEN", "BAG GARM",
+    "Ribbon", "Carton", "All Products",
+    "BADGE", "BAG OTHER", "BOX RIGID", "BUTTON", "HEADER", "HEAT LABEL", "HOOK",
+    "OTHER", "PRINT", "RAW INK", "RAW OTHER", "RAW RIBBON", "RAW STK", "RAW THERMO",
+    "RFID", "RFID HTG", "RFID STK", "RIDER", "RIS CARE", "RIS HTG", "RIS STK",
+    "STICKER", "STRING", "WATERFALL",
+]
 # Email người duyệt Root Cause/CAPA/Defect (Kim, Duy...) — nhận thông báo NGAY khi có đề xuất mới,
 # không cần chờ ai mở tab Duyệt Taxonomy trên review_app.py mới được báo.
 APPROVER_EMAILS = [e.strip() for e in st.secrets.get("APPROVER_EMAILS", "").split(",") if e.strip()]
@@ -241,9 +249,29 @@ Chỉ trả lời bằng JSON đúng định dạng sau, không thêm chữ nào
     return json.loads(text)
 
 
+def classify_product_group(client, item_no_text, product_group_list):
+    """Phân loại Item No. (chữ tự do NCC gõ) vào đúng 1 trong các nhóm Product Group chuẩn cố định
+    — không phải taxonomy có mã, chỉ chọn đúng 1 giá trị trong danh sách cho trước."""
+    options_text = ", ".join(product_group_list)
+    prompt = f"""Đây là danh sách Product Group chuẩn của công ty: {options_text}
+
+Item No. do nhà cung cấp tự gõ: "{item_no_text}"
+
+Nhiệm vụ: chọn đúng 1 giá trị PHÙ HỢP NHẤT trong danh sách trên cho Item No. này (dựa vào tên/mã
+sản phẩm — ví dụ "HTG" hay "hangtag" trong tên → HANGTAG; "STK" hay "sticker" → STICKER; "woven
+label" → WOVEN...). Nếu không chắc chắn, chọn "OTHER".
+Chỉ trả lời đúng 1 từ/cụm từ khớp chính xác với 1 giá trị trong danh sách, không thêm chữ nào khác."""
+    resp = client.messages.create(
+        model="claude-haiku-4-5-20251001", max_tokens=30,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    result = extract_text(resp).strip()
+    return result if result in product_group_list else "OTHER"
+
+
 def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw, vendor_name_matched,
                              sales_order_no, purchase_order_no, order_qty, defect_qty,
-                             description, root_cause_text, capa_text):
+                             description, root_cause_text, capa_text, item_no):
     supplier_id = get_or_create_supplier(conn, vendor_name_matched or supplier_name_raw)
 
     # AI gợi ý mã khớp sẵn có cho reviewer — không bắt buộc phải thành công, nếu lỗi thì vẫn tạo
@@ -267,7 +295,23 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
     rc_result = _classify_safe(root_cause_text, "Root Cause")
     capa_result = _classify_safe(capa_text, "CAPA")
 
+    product_group_guess = None
+    if ai_client and item_no:
+        try:
+            product_group_guess = classify_product_group(ai_client, item_no, PRODUCT_GROUPS)
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            product_group_guess = None
+
     with conn.cursor() as cur:
+        if product_group_guess:
+            cur.execute(
+                "update supplier_submissions set product_group = %s where submission_id = %s;",
+                (product_group_guess, submission_id),
+            )
         cur.execute(
             """insert into complaint
                    (date_opened, source, supplier_id, so_po, quantity_inspected, quantity_affected,
@@ -482,7 +526,7 @@ if submitted:
                         conn, submission_id, record_date_in, supplier_name_raw.strip(),
                         vendor_name_matched, sales_order_no.strip(), purchase_order_no.strip(),
                         int(order_qty), int(defect_qty), description.strip(),
-                        root_cause.strip(), capa.strip(),
+                        root_cause.strip(), capa.strip(), item_no.strip(),
                     )
                 except Exception:
                     # Bắt buộc rollback — nếu không, transaction bị "kẹt" và MỌI câu lệnh SQL sau
