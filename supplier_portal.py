@@ -367,6 +367,17 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
 # GIAO DIỆN
 # ============================================================
 st.set_page_config(page_title="Nilorn Supplier Quality Report", layout="centered")
+
+# Chạm nhẹ vào database ngay khi tải trang (kể cả chưa nộp gì) — để cron-job ping trang này định
+# kỳ cũng tạo ra hoạt động thật cho Supabase, tránh bị tự động pause do 7 ngày không hoạt động.
+# Bọc try/except vì đây chỉ là "giữ ấm", không được phép làm gãy trang nếu lỗi.
+try:
+    _keepalive_conn = ensure_connection()
+    with _keepalive_conn.cursor() as _cur:
+        _cur.execute("select 1;")
+except Exception:
+    pass
+
 st.markdown(
     """<style>
 .stApp { background: #f4f5f8; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
