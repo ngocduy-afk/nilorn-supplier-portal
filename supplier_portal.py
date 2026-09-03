@@ -519,15 +519,15 @@ if submitted:
                                (record_date, supplier_name_raw, sales_order_no, purchase_order_no, item_no,
                                 order_qty, defect_qty, description, root_cause, capa, capa_status,
                                 defect_image_urls, defect_video_url,
-                                vendor_code, vendor_name_matched, match_confidence)
-                           values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                vendor_code, vendor_name_matched, match_confidence, bear_the_claim)
+                           values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                            returning submission_id;""",
                         (record_date_in, supplier_name_raw.strip(), sales_order_no.strip(), purchase_order_no.strip(),
                          item_no.strip(), int(order_qty), int(defect_qty), description.strip(),
                          root_cause.strip(), capa.strip(), "",  # capa_status không còn hỏi NCC — trạng thái
                          # xử lý giờ do CS quản lý tập trung qua "Trạng thái xử lý complaint" ở Truy xuất dữ liệu.
                          _json.dumps(image_urls), video_url,
-                         vendor_code, vendor_name_matched, confidence),
+                         vendor_code, vendor_name_matched, confidence, "100% Nilorn"),
                     )
                     submission_id = cur.fetchone()[0]
                 conn.commit()
