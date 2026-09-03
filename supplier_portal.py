@@ -314,12 +314,12 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
             )
         cur.execute(
             """insert into complaint
-                   (date_opened, source, supplier_id, so_po, quantity_inspected, quantity_affected,
+                   (date_opened, source, supplier_id, so_po, lot_number, quantity_inspected, quantity_affected,
                     notes, status, source_submission_id)
-               values (%s, %s, %s, %s, %s, %s, %s, 'Thiếu Customer', %s)
+               values (%s, %s, %s, %s, %s, %s, %s, %s, 'Thiếu Customer', %s)
                returning complaint_id;""",
             (record_date, "Nhà cung cấp tự khai báo (link chung)", supplier_id,
-             f"{sales_order_no} / {purchase_order_no}", order_qty, defect_qty, description, submission_id),
+             sales_order_no, purchase_order_no, order_qty, defect_qty, description, submission_id),
         )
         complaint_id = cur.fetchone()[0]
 
