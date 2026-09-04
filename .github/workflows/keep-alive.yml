@@ -1,0 +1,48 @@
+name: Keep Supplier Portal Awake
+
+on:
+  schedule:
+    # Chạy mỗi 6 tiếng (00:00, 06:00, 12:00, 18:00 UTC) — có margin an toàn so với
+    # ngưỡng sleep 12 tiếng của Streamlit Community Cloud.
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}  # cho phép bấm "Run workflow" trên tab Actions để test tay ngay lập tức
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Visit supplier portal to keep it awake
+        run: |
+          python - <<'EOF'
+          from playwright.sync_api import sync_playwright
+
+          URL = "https://nilorn-supplier-app-zccldhcz5ghgnrk5mfkisg.streamlit.app"
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page()
+              page.goto(URL, timeout=60000, wait_until="networkidle")
+              page.wait_for_timeout(5000)
+
+              # Nếu app đang ngủ, Streamlit hiện nút "Yes, get this app back up!" cần bấm mới
+              # đánh thức được — một request HTTP thô không bấm được nút này, đây là lý do
+              # cron-job.org không giữ app tỉnh được dù ping đều đặn.
+              wake_button = page.get_by_text("get this app back up", exact=False)
+              if wake_button.count() > 0:
+                  print("App đang ngủ — đang bấm nút đánh thức...")
+                  wake_button.first.click()
+                  page.wait_for_timeout(15000)  # đợi app khởi động lại hoàn toàn
+
+              print("Đã ghé thăm:", page.title())
+              browser.close()
+          EOF
