@@ -30,7 +30,7 @@ DB_PASSWORD = st.secrets.get("DB_PASSWORD", "")
 
 GMAIL_NOTIFY_ADDRESS = st.secrets.get("GMAIL_NOTIFY_ADDRESS", "")
 GMAIL_NOTIFY_APP_PASSWORD = st.secrets.get("GMAIL_NOTIFY_APP_PASSWORD", "")
-REVIEW_APP_URL = st.secrets.get("REVIEW_APP_URL", "http://172.16.60.151:8501")
+REVIEW_APP_URL = st.secrets.get("REVIEW_APP_URL", "http://172.16.60.240:8501")
 ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 PRODUCT_GROUPS = [
     "HANGTAG", "WOVEN", "BAG GARM",
@@ -162,9 +162,33 @@ def match_vendor(conn, typed_name):
     with conn.cursor() as cur:
         cur.execute("select vendor_code, vendor_name from vendor_lookup;")
         rows = cur.fetchall()
+
+    # 1) Khớp tuyệt đối
     for code, name in rows:
         if normalize_text(name) == typed_norm:
             return code, name, "exact"
+
+    # 2) Khớp kiểu "tên ngắn nằm trong tên đầy đủ" (hoặc ngược lại) — rất phổ biến khi NCC gõ
+    # tên rút gọn (vd "Long River") trong khi vendor_lookup lưu tên pháp lý đầy đủ kèm hậu tố
+    # "Co., Ltd" / "Joint Stock Company" khiến tỉ lệ tương đồng ở bước 3 bị pha loãng xuống dưới
+    # ngưỡng dù về bản chất là cùng 1 công ty. Chỉ áp dụng khi tên đủ dài (>=4 ký tự) để tránh
+    # khớp nhầm với tên quá ngắn/chung chung.
+    if len(typed_norm) >= 4:
+        substring_candidates = []
+        for code, name in rows:
+            name_norm = normalize_text(name)
+            if typed_norm in name_norm or name_norm in typed_norm:
+                substring_candidates.append((code, name, len(name_norm)))
+        if substring_candidates:
+            # Nếu khớp với nhiều tên, ưu tiên tên NGẮN NHẤT trong số khớp được — thường sát nghĩa
+            # nhất (vd "Long River" nên khớp "Long River Co., Ltd" hơn là 1 tên dài hơn khác cũng
+            # chứa cụm này).
+            substring_candidates.sort(key=lambda x: x[2])
+            code, name, _ = substring_candidates[0]
+            return code, name, "fuzzy"
+
+    # 3) Khớp gần đúng theo tỉ lệ tương đồng chuỗi — dành cho lỗi chính tả nhẹ, không phải quan hệ
+    # "tên rút gọn / tên đầy đủ" (đã xử lý ở bước 2).
     best_code, best_name, best_ratio = None, None, 0.0
     for code, name in rows:
         ratio = difflib.SequenceMatcher(None, normalize_text(name), typed_norm).ratio()
