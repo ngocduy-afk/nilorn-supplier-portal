@@ -344,7 +344,7 @@ Chỉ trả lời đúng 1 từ/cụm từ khớp chính xác với 1 giá trị
 
 def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw, vendor_name_matched,
                              sales_order_no, purchase_order_no, order_qty, defect_qty,
-                             description, root_cause_text, capa_text, item_no):
+                             description, root_cause_text, capa_text, item_no, recorded_by_staff_id=None):
     supplier_id = get_or_create_supplier(conn, vendor_name_matched or supplier_name_raw)
 
     # AI gợi ý mã khớp sẵn có cho reviewer — không bắt buộc phải thành công, nếu lỗi thì vẫn tạo
@@ -388,11 +388,12 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
         cur.execute(
             """insert into complaint
                    (date_opened, source, supplier_id, so_po, lot_number, quantity_inspected, quantity_affected,
-                    notes, status, source_submission_id)
-               values (%s, %s, %s, %s, %s, %s, %s, %s, 'Thiếu Customer', %s)
+                    notes, status, source_submission_id, recorded_by)
+               values (%s, %s, %s, %s, %s, %s, %s, %s, 'Thiếu Customer', %s, %s)
                returning complaint_id;""",
             (record_date, "Nhà cung cấp tự khai báo (link chung)", supplier_id,
-             sales_order_no, purchase_order_no, order_qty, defect_qty, description, submission_id),
+             sales_order_no, purchase_order_no, order_qty, defect_qty, description, submission_id,
+             recorded_by_staff_id),
         )
         complaint_id = cur.fetchone()[0]
 
@@ -490,6 +491,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+def fetch_cs_staff_list(conn):
+    with conn.cursor() as cur:
+        cur.execute("select staff_id, name, role, email from cs_staff order by name;")
+        return cur.fetchall()
+
+
+_conn_for_staff = get_connection()
+cs_staff_list = fetch_cs_staff_list(_conn_for_staff)
+cs_staff_labels = [f"{name} ({role})" for _, name, role, _ in cs_staff_list]
+
 with st.form("supplier_report_form", clear_on_submit=False):
     with zone_card("blue"):
         st.markdown("#### 1. Your Company & Order Information")
@@ -527,13 +539,14 @@ with st.form("supplier_report_form", clear_on_submit=False):
 
     with zone_card("blue"):
         st.markdown("#### 4. Prepared By")
+        recorded_by_choice = st.selectbox("Recorded by (Nilorn CS in charge) *", cs_staff_labels)
         prep_col1, prep_col2 = st.columns(2)
         with prep_col1:
             prepared_by = st.text_input("Prepared by (full name) *")
         with prep_col2:
             prepared_by_position = st.text_input("Position *")
         signature_image = st.file_uploader(
-            f"Signature image (optional, max {MAX_IMAGE_MB}MB)",
+            f"Signature image (required, max {MAX_IMAGE_MB}MB) *",
             type=["png", "jpg", "jpeg"],
         )
 
@@ -565,6 +578,10 @@ if submitted:
         missing.append("Prepared by")
     if not prepared_by_position.strip():
         missing.append("Position")
+    if not signature_image:
+        missing.append("Signature image")
+    if not recorded_by_choice:
+        missing.append("Recorded by (CS in charge)")
 
     oversized = []
     if defect_images:
@@ -630,12 +647,14 @@ if submitted:
 
                 check_and_warn_duplicate_so(conn, submission_id, sales_order_no.strip(), record_date_in)
 
+                recorded_by_staff_id = cs_staff_list[cs_staff_labels.index(recorded_by_choice)][0]
+
                 try:
                     bridge_to_legacy_tables(
                         conn, submission_id, record_date_in, supplier_name_raw.strip(),
                         vendor_name_matched, sales_order_no.strip(), purchase_order_no.strip(),
                         int(order_qty), int(defect_qty), description.strip(),
-                        root_cause.strip(), capa.strip(), item_no.strip(),
+                        root_cause.strip(), capa.strip(), item_no.strip(), recorded_by_staff_id,
                     )
                 except Exception:
                     # Bắt buộc rollback — nếu không, transaction bị "kẹt" và MỌI câu lệnh SQL sau
@@ -660,13 +679,19 @@ if submitted:
                     f"Description: {description.strip()}\n"
                     f"Root Cause: {root_cause.strip()}\n"
                     f"CAPA: {capa.strip()}\n\n"
+                    f"Recorded by: {recorded_by_choice}\n\n"
                     f"Photos attached: {len(image_urls)}" + (" | Video attached" if video_url else "") + "\n\n"
                     f"Open the app to review and complete Customer / Replacement Cost: {REVIEW_APP_URL}"
                 )
+                recorded_by_name = cs_staff_list[cs_staff_labels.index(recorded_by_choice)][1]
+                recorded_by_email = cs_staff_list[cs_staff_labels.index(recorded_by_choice)][3]
+                recipients = list(TEAM_EMAILS)
+                if recorded_by_email and recorded_by_email not in recipients:
+                    recipients.append(recorded_by_email)
                 mail_ok, mail_err = send_notification_email(
-                    TEAM_EMAILS, f"[Nilorn Internal AI] New supplier report — {supplier_name_raw.strip()}", body,
+                    recipients, f"[Nilorn Internal AI] New supplier report — {supplier_name_raw.strip()}", body,
                 )
-                _log_notify_attempt(conn, submission_id, TEAM_EMAILS, mail_ok, mail_err)
+                _log_notify_attempt(conn, submission_id, recipients, mail_ok, mail_err)
 
                 st.success("✅ Thank you — your report has been submitted successfully.")
                 st.balloons()
