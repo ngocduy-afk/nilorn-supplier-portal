@@ -47,6 +47,12 @@ APPROVER_EMAILS = [e.strip() for e in st.secrets.get("APPROVER_EMAILS", "").spli
 # Danh sách email nhận thông báo "có báo cáo mới từ NCC" — điền toàn bộ CS cần biết.
 TEAM_EMAILS = [e.strip() for e in st.secrets.get("TEAM_EMAILS", "").split(",") if e.strip()]
 
+# Hộp thư CS chung — LUÔN nhận thông báo mỗi khi có báo cáo mới, không phụ thuộc cấu hình
+# TEAM_EMAILS trên Secrets (tránh trường hợp quên điền/điền sai làm mất thông báo hoàn toàn).
+CS_GENERAL_EMAIL = "CS.NVN@vn.nilorn.com"
+if CS_GENERAL_EMAIL not in TEAM_EMAILS:
+    TEAM_EMAILS = TEAM_EMAILS + [CS_GENERAL_EMAIL]
+
 # Supabase Storage — dùng để lưu ảnh/video (KHÔNG nhét base64 vào database nữa, tránh phình dung
 # lượng — đặc biệt quan trọng với video vì file lớn hơn ảnh rất nhiều).
 SUPABASE_PROJECT_REF = st.secrets.get("SUPABASE_PROJECT_REF", "sdlkfcwjfvtvpjwcmdxr")
@@ -206,6 +212,49 @@ def match_vendor(conn, typed_name):
 # reviewer đã có sẵn, không xây lại từ đầu. Khi reviewer duyệt xong, cơ chế cũ tự cập nhật thẳng
 # vào bảng complaint — không cần thêm code đồng bộ nào nữa.
 # ============================================================
+def check_and_warn_duplicate_so(conn, submission_id, sales_order_no, record_date):
+    """Kiểm tra xem Sales Order No. này đã được nộp lần nào khác TRONG CÙNG NGÀY chưa — nếu có,
+    gửi email cảnh báo (khả năng NCC nộp trùng 1 lần thành 2 complaint riêng biệt) tới hộp thư CS
+    chung, email CS đang phụ trách báo cáo gốc (nếu đã có ai được gán), và các reviewer duyệt."""
+    if not sales_order_no:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """select ss.submission_id, ss.submitted_at, st.email
+                   from supplier_submissions ss
+                   left join complaint c on c.source_submission_id = ss.submission_id
+                   left join cs_staff st on c.recorded_by = st.staff_id
+                   where ss.sales_order_no = %s and ss.record_date = %s and ss.submission_id != %s;""",
+                (sales_order_no, record_date, submission_id),
+            )
+            duplicates = cur.fetchall()
+    except Exception:
+        return
+    if not duplicates:
+        return
+
+    recipients = [CS_GENERAL_EMAIL] + APPROVER_EMAILS
+    for _, _, staff_email in duplicates:
+        if staff_email and staff_email not in recipients:
+            recipients.append(staff_email)
+
+    dup_lines = "\n".join(
+        f"- Submission {dup_id} (nộp lúc {submitted_at})" for dup_id, submitted_at, _ in duplicates
+    )
+    body = (
+        f"⚠️ Phát hiện khả năng NỘP TRÙNG báo cáo — cùng Sales Order No. '{sales_order_no}' đã được "
+        f"nộp {len(duplicates)} lần khác trong cùng ngày {record_date}:\n\n{dup_lines}\n\n"
+        f"Submission mới nhất vừa nộp: {submission_id}\n\n"
+        f"Vui lòng kiểm tra lại để tránh ghi nhận thành 2 complaint riêng biệt cho cùng 1 sự cố.\n"
+        f"Mở app để xem chi tiết: {REVIEW_APP_URL}"
+    )
+    mail_ok, mail_err = send_notification_email(
+        recipients, f"[Nilorn Internal AI] ⚠️ Cảnh báo trùng Sales Order No. — {sales_order_no}", body,
+    )
+    _log_notify_attempt(conn, submission_id, recipients, mail_ok, mail_err)
+
+
 def get_or_create_supplier(conn, name):
     if not name:
         return None
@@ -476,6 +525,18 @@ with st.form("supplier_report_form", clear_on_submit=False):
             type=["mp4", "mov", "avi", "webm"],
         )
 
+    with zone_card("blue"):
+        st.markdown("#### 4. Prepared By")
+        prep_col1, prep_col2 = st.columns(2)
+        with prep_col1:
+            prepared_by = st.text_input("Prepared by (full name) *")
+        with prep_col2:
+            prepared_by_position = st.text_input("Position *")
+        signature_image = st.file_uploader(
+            f"Signature image (optional, max {MAX_IMAGE_MB}MB)",
+            type=["png", "jpg", "jpeg"],
+        )
+
     submitted = st.form_submit_button("✅ Submit Report")
 
 if submitted:
@@ -500,6 +561,10 @@ if submitted:
         missing.append("Corrective Action (CAPA)")
     if not defect_images:
         missing.append("At least 1 defect photo")
+    if not prepared_by.strip():
+        missing.append("Prepared by")
+    if not prepared_by_position.strip():
+        missing.append("Position")
 
     oversized = []
     if defect_images:
@@ -508,6 +573,8 @@ if submitted:
                 oversized.append(f.name)
     if defect_video and len(defect_video.getvalue()) > MAX_VIDEO_MB * 1024 * 1024:
         oversized.append(defect_video.name)
+    if signature_image and len(signature_image.getvalue()) > MAX_IMAGE_MB * 1024 * 1024:
+        oversized.append(signature_image.name)
 
     if missing:
         st.warning("Please complete the following before submitting: " + "; ".join(missing) + ".")
@@ -527,6 +594,9 @@ if submitted:
                 video_url = None
                 if defect_video:
                     video_url = upload_to_storage(defect_video.getvalue(), defect_video.name, defect_video.type)
+                signature_url = None
+                if signature_image:
+                    signature_url = upload_to_storage(signature_image.getvalue(), signature_image.name, signature_image.type)
             except Exception as e:
                 upload_error = str(e)
 
@@ -543,18 +613,22 @@ if submitted:
                                (record_date, supplier_name_raw, sales_order_no, purchase_order_no, item_no,
                                 order_qty, defect_qty, description, root_cause, capa, capa_status,
                                 defect_image_urls, defect_video_url,
-                                vendor_code, vendor_name_matched, match_confidence, bear_the_claim)
-                           values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                vendor_code, vendor_name_matched, match_confidence, bear_the_claim,
+                                prepared_by, prepared_by_position, signature_image_url)
+                           values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                            returning submission_id;""",
                         (record_date_in, supplier_name_raw.strip(), sales_order_no.strip(), purchase_order_no.strip(),
                          item_no.strip(), int(order_qty), int(defect_qty), description.strip(),
                          root_cause.strip(), capa.strip(), "",  # capa_status không còn hỏi NCC — trạng thái
                          # xử lý giờ do CS quản lý tập trung qua "Trạng thái xử lý complaint" ở Truy xuất dữ liệu.
                          _json.dumps(image_urls), video_url,
-                         vendor_code, vendor_name_matched, confidence, "100% Nilorn"),
+                         vendor_code, vendor_name_matched, confidence, "100% Nilorn",
+                         prepared_by.strip(), prepared_by_position.strip(), signature_url),
                     )
                     submission_id = cur.fetchone()[0]
                 conn.commit()
+
+                check_and_warn_duplicate_so(conn, submission_id, sales_order_no.strip(), record_date_in)
 
                 try:
                     bridge_to_legacy_tables(
