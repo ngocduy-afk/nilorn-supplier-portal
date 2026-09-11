@@ -30,7 +30,7 @@ DB_PASSWORD = st.secrets.get("DB_PASSWORD", "")
 
 GMAIL_NOTIFY_ADDRESS = st.secrets.get("GMAIL_NOTIFY_ADDRESS", "")
 GMAIL_NOTIFY_APP_PASSWORD = st.secrets.get("GMAIL_NOTIFY_APP_PASSWORD", "")
-REVIEW_APP_URL = st.secrets.get("REVIEW_APP_URL", "http://172.16.60.240:8501")
+REVIEW_APP_URL = st.secrets.get("REVIEW_APP_URL", "https://nilorn-review-app.streamlit.app")
 ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 PRODUCT_GROUPS = [
     "HANGTAG", "WOVEN", "BAG GARM",
