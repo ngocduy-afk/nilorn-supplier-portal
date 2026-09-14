@@ -413,9 +413,9 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
             suggested_name = text[:200]
             cur.execute(
                 """insert into taxonomy_suggestion
-                       (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning, closest_existing_code)
-                   values (%s, %s, %s, %s, %s);""",
-                (complaint_id, kind, suggested_name, reasoning, closest),
+                       (complaint_id, suggestion_type, ai_suggested_name, ai_reasoning, closest_existing_code, full_text)
+                   values (%s, %s, %s, %s, %s, %s);""",
+                (complaint_id, kind, suggested_name, reasoning, closest, text),
             )
             new_suggestions.append((kind, text))
 
