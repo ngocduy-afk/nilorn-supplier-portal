@@ -397,7 +397,8 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
         )
         complaint_id = cur.fetchone()[0]
 
-        new_suggestions = []  # (kind, ai_suggested_name) — dùng để soạn email báo reviewer bên dưới
+        new_suggestions = []  # (kind, full_text) — dùng để soạn email báo reviewer bên dưới, giữ ĐẦY ĐỦ
+        # (không cắt ngắn như ai_suggested_name lưu DB) để reviewer có đủ ngữ cảnh khi duyệt qua email.
 
         for kind, text, result in [
             ("Defect", description, defect_result),
@@ -416,7 +417,7 @@ def bridge_to_legacy_tables(conn, submission_id, record_date, supplier_name_raw,
                    values (%s, %s, %s, %s, %s);""",
                 (complaint_id, kind, suggested_name, reasoning, closest),
             )
-            new_suggestions.append((kind, suggested_name))
+            new_suggestions.append((kind, text))
 
     conn.commit()
 
