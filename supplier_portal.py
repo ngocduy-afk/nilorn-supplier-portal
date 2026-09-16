@@ -506,7 +506,7 @@ cs_staff_labels = [f"{name} ({role})" for _, name, role, _ in cs_staff_list]
 with st.form("supplier_report_form", clear_on_submit=False):
     with zone_card("blue"):
         st.markdown("#### 1. Your Company & Order Information")
-        supplier_name_raw = st.text_input("Your Company Name (Supplier/Vendor) *")
+        supplier_name_raw = st.text_input("Your Company Name *")
         record_date_in = st.date_input("Record Date *", value=datetime.now().date())
         col1, col2 = st.columns(2)
         with col1:
