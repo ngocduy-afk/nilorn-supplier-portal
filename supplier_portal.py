@@ -12,6 +12,7 @@ import base64
 import re
 import uuid
 import difflib
+import unicodedata
 import smtplib
 import requests
 import anthropic
@@ -160,6 +161,29 @@ def normalize_text(s):
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+# Stopword các từ pháp lý/chung chung (VN + EN) — bỏ qua khi so khớp theo từ khóa đặc trưng,
+# vd để "CÔNG TY TNHH ... SAMSON (VIỆT NAM)" và "Samson (Vietnam) Printing & Garment Access. Co.LTD"
+# đều còn lại từ khóa chung là "samson".
+_VENDOR_NAME_STOPWORDS = {
+    "cong", "ty", "tnhh", "cp", "cty", "mot", "thanh", "vien", "tap", "doan",
+    "xi", "nghiep", "san", "xuat", "thuong", "mai", "dich", "vu", "quoc", "te",
+    "viet", "nam", "in", "an", "phu", "lieu", "may", "mac", "access",
+    "co", "ltd", "limited", "inc", "incorporated", "corp", "corporation",
+    "company", "companies", "jsc", "plc", "llc", "pte", "sdn", "bhd", "gmbh",
+    "vietnam", "vn", "the", "and", "printing", "garment",
+}
+
+
+def _strip_accents(s):
+    return "".join(c for c in unicodedata.normalize("NFD", s or "") if unicodedata.category(c) != "Mn")
+
+
+def _distinctive_name_tokens(name):
+    norm = _strip_accents(name).lower()
+    words = re.findall(r"[a-z0-9]+", norm)
+    return {w for w in words if len(w) >= 3 and w not in _VENDOR_NAME_STOPWORDS}
+
+
 def match_vendor(conn, typed_name):
     """Trả về (vendor_code, vendor_name, confidence) — confidence: 'exact' | 'fuzzy' | 'unmatched'."""
     typed_norm = normalize_text(typed_name)
@@ -191,6 +215,23 @@ def match_vendor(conn, typed_name):
             # chứa cụm này).
             substring_candidates.sort(key=lambda x: x[2])
             code, name, _ = substring_candidates[0]
+            return code, name, "fuzzy"
+
+    # 2.5) Khớp qua từ khóa đặc trưng (thường là tên thương hiệu, vd "Samson") — bỏ dấu tiếng
+    # Việt + bỏ các từ pháp lý chung chung, so phần từ khóa còn lại. Bắt được các trường hợp tên
+    # pháp lý tiếng Việt đầy đủ và tên thương mại tiếng Anh gần như không trùng ký tự/chuỗi con
+    # nào (nên bước 2 và bước 3 đều bỏ sót), nhưng vẫn cùng chung một từ khóa thương hiệu.
+    typed_tokens = _distinctive_name_tokens(typed_name)
+    if typed_tokens:
+        token_candidates = []
+        for code, name in rows:
+            shared = typed_tokens & _distinctive_name_tokens(name)
+            strong_shared = {w for w in shared if len(w) >= 4}
+            if strong_shared:
+                token_candidates.append((code, name, len(strong_shared), len(name or "")))
+        if token_candidates:
+            token_candidates.sort(key=lambda x: (-x[2], x[3]))
+            code, name, _, _ = token_candidates[0]
             return code, name, "fuzzy"
 
     # 3) Khớp gần đúng theo tỉ lệ tương đồng chuỗi — dành cho lỗi chính tả nhẹ, không phải quan hệ
