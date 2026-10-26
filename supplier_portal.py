@@ -184,31 +184,44 @@ def _distinctive_name_tokens(name):
     return {w for w in words if len(w) >= 3 and w not in _VENDOR_NAME_STOPWORDS}
 
 
+def _compact_name(s):
+    """Bỏ dấu + bỏ mọi ký tự không phải chữ/số (khoảng trắng, dấu chấm, phẩy, ngoặc...) —
+    để "Viet Nam" = "Vietnam", "Co., Ltd" = "Co. Ltd" = "CoLtd" khi so khớp."""
+    return re.sub(r"[^a-z0-9]", "", _strip_accents(s).lower())
+
+
 def match_vendor(conn, typed_name):
     """Trả về (vendor_code, vendor_name, confidence) — confidence: 'exact' | 'fuzzy' | 'unmatched'."""
     typed_norm = normalize_text(typed_name)
     if not typed_norm:
         return None, None, "unmatched"
+    typed_compact = _compact_name(typed_name)
     with conn.cursor() as cur:
         cur.execute("select vendor_code, vendor_name from vendor_lookup;")
         rows = cur.fetchall()
 
-    # 1) Khớp tuyệt đối
+    # 1) Khớp tuyệt đối (cả dạng thường lẫn dạng rút gọn bỏ dấu/dấu câu/khoảng trắng)
     for code, name in rows:
         if normalize_text(name) == typed_norm:
             return code, name, "exact"
+    if typed_compact:
+        for code, name in rows:
+            if _compact_name(name) == typed_compact:
+                return code, name, "exact"
 
     # 2) Khớp kiểu "tên ngắn nằm trong tên đầy đủ" (hoặc ngược lại) — rất phổ biến khi NCC gõ
     # tên rút gọn (vd "Long River") trong khi vendor_lookup lưu tên pháp lý đầy đủ kèm hậu tố
     # "Co., Ltd" / "Joint Stock Company" khiến tỉ lệ tương đồng ở bước 3 bị pha loãng xuống dưới
     # ngưỡng dù về bản chất là cùng 1 công ty. Chỉ áp dụng khi tên đủ dài (>=4 ký tự) để tránh
     # khớp nhầm với tên quá ngắn/chung chung.
-    if len(typed_norm) >= 4:
+    # So trên dạng rút gọn (bỏ dấu/dấu câu/khoảng trắng) để "Nilorn Viet Nam" nằm trong
+    # "Nilorn Vietnam Long An Branch".
+    if len(typed_compact) >= 4:
         substring_candidates = []
         for code, name in rows:
-            name_norm = normalize_text(name)
-            if typed_norm in name_norm or name_norm in typed_norm:
-                substring_candidates.append((code, name, len(name_norm)))
+            name_compact = _compact_name(name)
+            if typed_compact in name_compact or (len(name_compact) >= 4 and name_compact in typed_compact):
+                substring_candidates.append((code, name, len(name_compact)))
         if substring_candidates:
             # Nếu khớp với nhiều tên, ưu tiên tên NGẮN NHẤT trong số khớp được — thường sát nghĩa
             # nhất (vd "Long River" nên khớp "Long River Co., Ltd" hơn là 1 tên dài hơn khác cũng
@@ -230,7 +243,13 @@ def match_vendor(conn, typed_name):
             if strong_shared:
                 token_candidates.append((code, name, len(strong_shared), len(name or "")))
         if token_candidates:
-            token_candidates.sort(key=lambda x: (-x[2], x[3]))
+            # Nhiều vendor cùng chung từ khóa thương hiệu (vd cả nhóm "Nilorn ...") thì KHÔNG được
+            # chọn tên ngắn nhất — phải chọn cái giống tên NCC gõ nhất trên dạng rút gọn.
+            # Cùng điểm giống thì mới ưu tiên tên ngắn hơn.
+            def _rank(c):
+                ratio = difflib.SequenceMatcher(None, _compact_name(c[1]), typed_compact).ratio()
+                return (-c[2], -ratio, c[3])
+            token_candidates.sort(key=_rank)
             code, name, _, _ = token_candidates[0]
             return code, name, "fuzzy"
 
